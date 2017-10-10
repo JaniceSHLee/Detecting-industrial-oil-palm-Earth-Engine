@@ -1,0 +1,155 @@
+# Code for GEE
+// Code for Earth Engine (https://code.earthengine.google.com/#)
+// Create a classification map using GEE for Tripa
+// Classification map contains the following classes
+// 1. Immature Oil Palm
+// 2. Mature Oil Palm
+// 3. Non-Oil Palm Non-Forest
+// 4. Natural Forest
+// 5. Water
+// 6. Clouds
+// GEE Link: https://code.earthengine.google.com/ec73913df7c6970e76831731d1f77f56
+
+// Step 1. Select LS 8 image for classification
+// Load collection of Landsat images from EE
+var collection = ee.ImageCollection("LANDSAT/LC8_L1T_TOA");
+// Filter the collection by space and time and to search for cloud-free images
+// Activate the Inspector tab on the right side of the Code Editor and click near
+// the center of your area of interest, copy the coordinates from the Inspector tab, then construct a Point using:
+var point = ee.Geometry.Point(96.5468, 3.8118);
+// Construct Start and End dates
+var start = ee.Date('2014-01-01');
+var finish = ee.Date('2014-12-31');
+// Filter the Landsat 8 collection using the point and the dates, then sort using a metadata property
+// (discovered during inspection of the Landsat 8 scene metadata):
+var filteredCollection = ee.ImageCollection('LANDSAT/LC8_L1T_TOA')
+  .filterBounds(point)
+  .filterDate(start, finish)
+  .sort('CLOUD_COVER', true);
+  print(filteredCollection);
+// This collection can be safely printed and inspected. (If the collection has too many images,
+// printing it will either be very slow, time out, or return an error).
+// Observe that the images in the collection are a List stored in the ‘features’ property of the
+// ImageCollection. The ID of any image in the collection can be copied into the Image constructor
+// as above. Alternatively, get the first image (lowest cloud cover):
+var first = filteredCollection.first();
+
+var image = ee.Image('LANDSAT/LC8_L1T_TOA/LC81300572014056LGN00');
+Export.image(image.uint8(), 'Image_LS8TOA', {
+  region: image.geometry(),
+  scale: 30,
+  });
+
+// Clip to region of interest
+// Create a circle by drawing a 10000 meter buffer around a point.
+var roi = ee.Geometry.Point(96.5468, 3.8118).buffer(10000);
+// Display a clipped version of the mosaic.
+var image1 = image.clip(roi);
+
+// For display purposes
+Map.addLayer(image1, {bands: ['B4', 'B3', 'B2'], max: 0.4},'image1');
+Map.centerObject(image1,11);
+Export.image(image1.uint8(), 'Image_LS8TOA_roi', {
+  region: image1.geometry(),
+  scale: 30,
+  });
+
+// Step 2. Classification - pixel based
+// Draw points by hand by clicking the point icon in the geometry drawing tools
+// a) Click '+new layer' to make six sets of points, each set representing
+// samples from a class
+// geometry: 'immature oil palm', geometry2: 'mature oil palm', geometry3: 'non-oil palm non-forest',
+// geometry4: 'natural forest', geometry5: 'water', geometry6: 'clouds'
+// b) For each set of points, in the imports, click the gear icon and 'Import as'
+// FeatureCollection. Also add a property called 'landcover' and set a consecutive
+// integer starting from 0 for the first class
+
+// The first line merges these four sets to make a single point training dataset,
+// where the class integer stored in the landcover property is the classProperty
+// argument of the classifier
+
+// Merge the hand-drawn point features
+var newfc = geometry.merge(geometry2).merge(geometry3).merge(geometry4).merge(geometry5).merge(geometry6);
+
+// Use of different bands for understanding land cover classification
+// http://landsat.usgs.gov/best_spectral_bands_to_use.php
+
+// Use multiple bands for prediction
+// var bands = ['B7', 'B5', 'B1'];
+// Use ALL Bands
+var bands = ['B10', 'B11', 'B7', 'B6', 'B5', 'B4', 'B3', 'B2'];
+
+// Make training data by 'overlaying' the points on the image
+var trainingTesting = image1.select(bands).sampleRegions({
+  collection: newfc,
+  properties: ['landcover'],
+  scale: 30
+}).randomColumn('random');
+
+// Partition the training
+var training = trainingTesting.filter(ee.Filter.lte('random', 0.6));
+print('Training n =', training.aggregate_count('.all'));
+
+var testing = trainingTesting.filter(ee.Filter.gt('random', 0.6));
+print('Testing n =', testing.aggregate_count('.all'));
+
+// CART classification
+// Get a CART classifier and train it.
+var classifier = ee.Classifier.cart().train({
+  features: training.select(['B10', 'B11', 'B7', 'B6', 'B5', 'B4', 'B3', 'B2', 'landcover']),
+  classProperty: 'landcover',
+  inputProperties: bands
+});
+var validation = testing.classify(classifier);
+var testAccuracy = validation.errorMatrix('landcover', 'classification');
+print('Validation error matrix CART: ', testAccuracy);
+print('Validation overall accuracy CART: ', testAccuracy.accuracy());
+// Classify the image with CART.
+var classifiedcart = image1.select(bands).classify(classifier);
+// Display classified image
+Map.addLayer(classifiedcart, {min: 0, max: 5, palette: ['ea99ff', '9e37df', 'e3dd37','239d11','00ffff','acb5c2']}, 'cart');
+Export.image(classifiedcart.uint8(), 'Image_Cart_all', {
+  region: classifiedcart.geometry(),
+  scale: 30,
+  });
+
+
+// RandomForest classification
+// Get a RandomForest classifier and train it.
+var classifier = ee.Classifier.randomForest().train({
+  features: training.select(['B10', 'B11', 'B7', 'B6', 'B5', 'B4', 'B3', 'B2', 'landcover']),
+  classProperty: 'landcover',
+  inputProperties: bands
+});
+var validation = testing.classify(classifier);
+var testAccuracy = validation.errorMatrix('landcover', 'classification');
+print('Validation error matrix RandomForest: ', testAccuracy);
+print('Validation overall accuracy RandomForest: ', testAccuracy.accuracy());
+// Classify the image with RandomForest.
+var classifiedrf = image1.select(bands).classify(classifier);
+// Display classified image
+Map.addLayer(classifiedrf, {min: 0, max: 5, palette: ['ea99ff', '9e37df', 'e3dd37','239d11','00ffff','acb5c2']}, 'randfor');
+Export.image(classifiedrf.uint8(), 'Image_RFT_all', {
+  region: classifiedrf.geometry(),
+  scale: 30,
+  });
+
+// minimumDistance  classification (mahalanobis has been deprecated)
+// Get a minimumDistance  classifier and train it.
+var classifier = ee.Classifier.minimumDistance().train({
+  features: training.select(['B10', 'B11', 'B7', 'B6', 'B5', 'B4', 'B3', 'B2', 'landcover']),
+  classProperty: 'landcover',
+  inputProperties: bands
+});
+var validation = testing.classify(classifier);
+var testAccuracy = validation.errorMatrix('landcover', 'classification');
+print('Validation error matrix MinimumDistance: ', testAccuracy);
+print('Validation overall accuracy MinimumDistance: ', testAccuracy.accuracy());
+// Classify the image with MinimumDistance.
+var classifiedmindis = image1.select(bands).classify(classifier);
+// Display classified image
+Map.addLayer(classifiedmindis, {min: 0, max: 5, palette: ['ea99ff', '9e37df', 'e3dd37','239d11','00ffff','acb5c2']}, 'mindist');
+Export.image(classifiedmindis.uint8(), 'Image_MinDis_all', {
+  region: classifiedmindis.geometry(),
+  scale: 30,
+  });
